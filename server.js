@@ -51,7 +51,7 @@ app.post('/execute', (req, res) => {
   // Execute the command with a timeout
   const child = exec(command, { 
     maxBuffer: 1024 * 1024 * 10, // 10MB buffer
-    timeout: 300000 // 5 minute timeout
+    timeout: 600000 // 10 minute timeout
   }, (error, stdout, stderr) => {
     if (error) {
       console.error(`Command execution error: ${error.message}`);
@@ -79,10 +79,10 @@ app.post('/execute', (req, res) => {
       child.kill();
       return res.status(408).json({
         success: false,
-        error: 'Command execution timeout (5 minutes)'
+        error: 'Command execution timeout (10 minutes)'
       });
     }
-  }, 300000);
+  }, 600000);
 });
 
 app.listen(PORT, () => {
