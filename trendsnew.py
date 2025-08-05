@@ -980,11 +980,14 @@ Focus on actionable betting insights. Be concise but thorough.
         
         return results
 
-    async def ai_generate_final_trends(self, scraped_data: List[Dict], statmuse_data: List[Dict]) -> Dict:
+    async def ai_generate_final_trends(self, scraped_data: List[Dict], statmuse_data: List[Dict], analysis_data: Dict) -> Dict:
         """Step 5: AI synthesizes all data to generate final 9 player prop + 6 team trends with enhanced fields"""
         
         prompt = f"""
-You are an expert sports betting analyst. Based on the scraped Baseball Reference data and StatMuse insights, generate exactly 9 player prop trends and 6 team trends for MLB betting.
+You are an expert sports betting analyst. Based on the scraped Baseball Reference data, StatMuse insights, and available prop bets, generate exactly 9 player prop trends and 6 team trends for MLB betting.
+
+AVAILABLE PROP BETS:
+{json.dumps(analysis_data.get('available_props', [])[:20], indent=2)}
 
 SCRAPED PLAYER DATA:
 {json.dumps(scraped_data, indent=2, default=str)}
@@ -993,23 +996,25 @@ STATMUSE INSIGHTS:
 {json.dumps(statmuse_data, indent=2, default=str)}
 
 CRITICAL REQUIREMENTS:
-1. ALL charts must be BAR CHARTS (chart_type: "bar")
-2. Use exactly 5 games in chart_data.recent_games (from Last 5 Games table)
-3. Generate sensible Y-axis intervals (no weird duplicates like 0,0,1,1,1)
-4. Create meaningful key_stats (no nonsensical phrases like "Ba Vs Rhp - higher")
-5. For team trends, provide simplified data or skip charts if data quality is poor
+1.  For each player trend, you MUST include the correct event_id and prop_type_id from the AVAILABLE PROP BETS data. Find the matching player and prop type to get the IDs.
+2.  ALL charts must be BAR CHARTS (chart_type: "bar")
+3.  Use exactly 5 games in chart_data.recent_games (from Last 5 Games table)
+4.  Generate sensible Y-axis intervals (no weird duplicates like 0,0,1,1,1)
+5.  Create meaningful key_stats (no nonsensical phrases like "Ba Vs Rhp - higher")
+6.  For team trends, provide simplified data or skip charts if data quality is poor
 
 Generate trends that are:
-1. Actionable for bettors
-2. Based on strong statistical evidence  
-3. Focused on upcoming games
-4. Clear and specific
+1.  Actionable for bettors
+2.  Based on strong statistical evidence
+3.  Focused on upcoming games
+4.  Clear and specific
 
 For each trend, provide:
 - A SHORT catchy headline (5-8 words max) for the trend card display
 - Chart data with EXACTLY 5 games from Baseball Reference Last 5 Games table
 - Meaningful key statistics (avoid nonsensical abbreviations)
 - Proper Y-axis values with clear intervals
+- The correct event_id and prop_type_id for player prop trends
 
 Return JSON format:
 {{
@@ -1023,6 +1028,8 @@ Return JSON format:
       "confidence": 85,
       "player_name": "Freddie Freeman",
       "prop_type": "RBIs",
+      "event_id": "b6a4b1e0-0b0a-4b0e-8b0a-0b0a4b0e8b0a",
+      "prop_type_id": "a6a4b1e0-0b0a-4b0e-8b0a-0b0a4b0e8b0a",
       "trend_type": "player_prop",
       "trend_category": "streak",
       "key_stats": {{
@@ -1165,6 +1172,8 @@ NOTE: For team trends, if you don't have reliable game-by-game team data, set ch
                     'data_sources': ['baseball_reference', 'ai_analysis'],
                     'metadata': {
                         'prop_type': trend.get('prop_type', ''),
+                        'event_id': trend.get('event_id'),
+                        'prop_type_id': trend.get('prop_type_id'),
                         'games_analyzed': 5,  # Always 5 games from Last 5 Games table
                         'scrape_timestamp': player_data.get('scrape_timestamp') if player_data else None,
                         'chart_type': 'bar'  # Always bar charts
@@ -1249,7 +1258,7 @@ NOTE: For team trends, if you don't have reliable game-by-game team data, set ch
             
             # Step 5: AI generates final trends
             logger.info("Step 5: AI generating final trends...")
-            final_trends = await self.ai_generate_final_trends(successful_scrapes, statmuse_data)
+            final_trends = await self.ai_generate_final_trends(successful_scrapes, statmuse_data, analysis_data)
             
             # Step 6: Store trends in database
             logger.info("Step 6: Storing trends in database...")
