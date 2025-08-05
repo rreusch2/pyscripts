@@ -44,9 +44,11 @@ class ResearchInsight:
     timestamp: datetime
 
 class StatMuseClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:5001"):
-        self.base_url = base_url
+    def __init__(self, base_url: str = None):
+        # Get the StatMuse API URL from environment variable, with fallback
+        self.base_url = base_url or os.getenv("STATMUSE_API_URL", "http://127.0.0.1:5001")
         self.session = requests.Session()
+        logger.info(f"Using StatMuse API URL: {self.base_url}")
         
     def query(self, question: str) -> Dict[str, Any]:
         try:
@@ -465,7 +467,7 @@ class IntelligentTeamsAgent:
         )
         # Add session for StatMuse context scraping
         self.session = requests.Session()
-        self.statmuse_base_url = "http://localhost:5001"
+        self.statmuse_base_url = os.getenv("STATMUSE_API_URL", "http://localhost:5001")
     
     def _distribute_picks_by_sport(self, games: List[Dict], target_picks: int = 50) -> Dict[str, int]:
         """Generate abundant picks across all available sports for frontend filtering"""
