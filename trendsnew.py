@@ -23,6 +23,7 @@ from datetime import datetime, timedelta, date
 from supabase import create_client, Client
 import logging
 from dotenv import load_dotenv
+load_dotenv()
 from openai import AsyncOpenAI
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, quote
