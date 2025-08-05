@@ -43,7 +43,7 @@ class DailyTrendsGenerator:
         self.supabase: Client = create_client(self.supabase_url, self.supabase_key)
         
         # StatMuse API server URL
-        self.statmuse_api_url = os.getenv('STATMUSE_API_URL', 'http://localhost:5001')
+        self.statmuse_api_url = os.getenv('STATMUSE_API_URL', 'https://web-production-f090e.up.railway.app')
         
         # Initialize Grok client properly like your other scripts
         self.grok_client = AsyncOpenAI(
