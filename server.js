@@ -34,7 +34,8 @@ app.post('/execute', (req, res) => {
     'python teams_enhanced.py',
     'python teams_enhanced.py --tomorrow',
     'python insights_personalized_enhanced.py',
-    'python daily_trends_generator.py'
+    'python daily_trends_generator.py',
+    'python trendsnew.py'
   ];
   
   // Check if command is allowed
