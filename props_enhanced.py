@@ -656,7 +656,7 @@ Generate intelligent research plan as JSON:
         
         try:
             response = await self.grok_client.chat.completions.create(
-                model="grok-3-beta",
+                model="grok-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.3
             )
@@ -1006,7 +1006,7 @@ Generate 3-6 high-value follow-up queries that will maximize our edge.
         
         try:
             response = await self.grok_client.chat.completions.create(
-                model="grok-3-beta",
+                model="grok-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.4
             )
@@ -1296,7 +1296,7 @@ REMEMBER:
         
         try:
             response = await self.grok_client.chat.completions.create(
-                model="grok-3-beta",
+                model="grok-4",
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=4000
@@ -1474,7 +1474,7 @@ REMEMBER:
                             "research_support": pick.get("research_support", "Based on comprehensive analysis"),
                             "ai_generated": True,
                             "research_insights_count": len(insights),
-                            "model_used": "grok-3-beta"
+                            "model_used": "grok-4"
                         }
                     })
                 else:
