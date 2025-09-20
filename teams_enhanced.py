@@ -44,7 +44,7 @@ class ResearchInsight:
     timestamp: datetime
 
 class StatMuseClient:
-    def __init__(self, base_url: str = "http://127.0.0.1:5001"):
+    def __init__(self, base_url: str = os.getenv("STATMUSE_API_URL", "http://127.0.0.1:5001")):
         self.base_url = base_url
         self.session = requests.Session()
         
@@ -483,7 +483,7 @@ class IntelligentTeamsAgent:
         )
         # Add session for StatMuse context scraping
         self.session = requests.Session()
-        self.statmuse_base_url = "http://localhost:5001"
+        self.statmuse_base_url = os.getenv("STATMUSE_API_URL", "http://localhost:5001")
         # NFL week mode flag - off by default; can be enabled via --nfl-week
         self.nfl_week_mode = False
         # NFL only mode flag - can be set externally
