@@ -44,11 +44,9 @@ class ResearchInsight:
     timestamp: datetime
 
 class StatMuseClient:
-    def __init__(self, base_url: str = None):
-        # Get the StatMuse API URL from environment variable, with fallback
-        self.base_url = base_url or os.getenv("STATMUSE_API_URL", "http://127.0.0.1:5001")
+    def __init__(self, base_url: str = "http://127.0.0.1:5001"):
+        self.base_url = base_url
         self.session = requests.Session()
-        logger.info(f"Using StatMuse API URL: {self.base_url}")
         
     def query(self, question: str) -> Dict[str, Any]:
         try:
@@ -187,9 +185,23 @@ class DatabaseClient:
             
             logger.info(f"Fetching games from UTC range ({start_iso}) to ({end_iso}) and filtering for local date {target_date}")
             
-            # Fetch games from all supported sports - using correct sport names from database
+            # Fetch games from specified sports - using correct sport names from database
             all_games = []
-            sports = ["Major League Baseball", "Women's National Basketball Association", "Ultimate Fighting Championship"]
+            # Preferred: explicit sport_filter list, if provided
+            if hasattr(self, 'sport_filter') and getattr(self, 'sport_filter'):
+                sports = list(getattr(self, 'sport_filter'))
+                logger.info(f"🎯 Sport filter active: {sports}")
+            elif hasattr(self, 'nfl_only_mode') and self.nfl_only_mode:
+                sports = ["National Football League"]
+                logger.info("🏈 NFL-only mode: Fetching NFL games only")
+            else:
+                sports = [
+                    "Major League Baseball",
+                    "Women's National Basketball Association",
+                    "Ultimate Fighting Championship",
+                    "National Football League",
+                    "College Football"
+                ]
             
             for sport in sports:
                 response = self.supabase.table("sports_events").select(
@@ -358,18 +370,22 @@ class DatabaseClient:
     
     def store_ai_predictions(self, predictions: List[Dict[str, Any]]):
         try:
-            # Sort predictions: WNBA first, MLB last (so MLB shows on top in UI)
+            # Sort predictions: WNBA first, MLB second, CFB third, NFL last (so NFL shows first in UI)
             def sport_priority(pred):
                 sport = pred.get("sport", "MLB")
                 if sport == "WNBA":
                     return 1  # Save first
                 elif sport == "MLB":
-                    return 3  # Save last
+                    return 2  # Save second
+                elif sport in ("CFB", "College Football"):
+                    return 3  # Save third
+                elif sport == "NFL":
+                    return 4  # Save last
                 else:
-                    return 2  # Other sports in middle
+                    return 5  # Other sports last
             
             sorted_predictions = sorted(predictions, key=sport_priority)
-            logger.info(f"📊 Saving predictions in UI order: WNBA first, MLB last")
+            logger.info(f"📊 Saving predictions in requested order: WNBA → MLB → CFB → NFL (NFL saved last)")
             
             for pred in sorted_predictions:
                 # Extract reasoning from metadata if available
@@ -467,11 +483,15 @@ class IntelligentTeamsAgent:
         )
         # Add session for StatMuse context scraping
         self.session = requests.Session()
-        self.statmuse_base_url = os.getenv("STATMUSE_API_URL", "http://localhost:5001")
+        self.statmuse_base_url = "http://localhost:5001"
+        # NFL week mode flag - off by default; can be enabled via --nfl-week
+        self.nfl_week_mode = False
+        # NFL only mode flag - can be set externally
+        self.nfl_only_mode = False
     
-    def _distribute_picks_by_sport(self, games: List[Dict], target_picks: int = 50) -> Dict[str, int]:
-        """Generate abundant picks across all available sports for frontend filtering"""
-        sport_counts = {"MLB": 0, "WNBA": 0, "MMA": 0}
+    def _distribute_picks_by_sport(self, games: List[Dict], target_picks: int = 15) -> Dict[str, int]:
+        """Distribute picks optimally across available sports"""
+        sport_counts = {"MLB": 0, "WNBA": 0, "MMA": 0, "NFL": 0, "CFB": 0}
         
         # Count available games by sport (map full names to abbreviations)
         for game in games:
@@ -482,23 +502,88 @@ class IntelligentTeamsAgent:
                 sport_counts["WNBA"] += 1
             elif sport == "Ultimate Fighting Championship":
                 sport_counts["MMA"] += 1
+            elif sport == "National Football League":
+                sport_counts["NFL"] += 1
+            elif sport == "College Football":
+                sport_counts["CFB"] += 1
         
         logger.info(f"Available games by sport: {sport_counts}")
         
-        # Generate abundant picks per sport (frontend will filter based on user preferences and tier)
-        # Target: 15-20 picks per available sport to ensure enough for all tiers
-        distribution = {}
+        # Initialize distribution
+        distribution = {"MLB": 0, "WNBA": 0, "MMA": 0, "NFL": 0, "CFB": 0}
         
-        for sport, game_count in sport_counts.items():
-            if game_count > 0:
-                # Generate 15-20 picks per sport if games are available
-                # This ensures we have enough for Elite (30), Pro (20), and various sport preferences
-                max_picks_for_sport = min(20, game_count * 4)  # Up to 4 picks per game
-                distribution[sport] = max_picks_for_sport
+        # NFL-only mode: allocate all picks to NFL
+        if hasattr(self, 'nfl_only_mode') and self.nfl_only_mode:
+            if sport_counts["NFL"] > 0:
+                distribution["NFL"] = min(target_picks, sport_counts["NFL"] * 3)  # Up to 3 bets per game
+                logger.info(f"🏈 NFL-only mode: Allocated {distribution['NFL']} picks to NFL")
             else:
-                distribution[sport] = 0
+                logger.warning("🏈 NFL-only mode requested but no NFL games available!")
+            return distribution
         
-        logger.info(f"Generous pick distribution for frontend filtering: {distribution}")
+        # Calculate optimal distribution for multi-sport mode
+        active_sports = [sport for sport, count in sport_counts.items() if count > 0]
+        
+        if not active_sports:
+            return {"MLB": 0, "WNBA": 0, "MMA": 0, "NFL": 0, "CFB": 0}
+        
+        # Smart distribution logic for exactly target_picks picks
+        remaining_picks = target_picks
+        
+        # Priority allocation based on available games and sport importance
+        # NFL gets priority if available (big game tonight)
+        if sport_counts["NFL"] > 0 and remaining_picks > 0:
+            nfl_picks = min(5, sport_counts["NFL"] * 3, remaining_picks)  # Up to 5 NFL picks
+            distribution["NFL"] = nfl_picks
+            remaining_picks -= nfl_picks
+            logger.info(f"🏈 Allocated {nfl_picks} picks to NFL (priority sport)")
+        
+        # MLB gets good allocation (major sport with multiple games)
+        if sport_counts["MLB"] > 0 and remaining_picks > 0:
+            mlb_picks = min(8, sport_counts["MLB"] * 2, remaining_picks)  # Up to 8 MLB picks
+            distribution["MLB"] = mlb_picks
+            remaining_picks -= mlb_picks
+            logger.info(f"⚾ Allocated {mlb_picks} picks to MLB")
+        
+        # WNBA gets solid allocation
+        if sport_counts["WNBA"] > 0 and remaining_picks > 0:
+            wnba_picks = min(4, sport_counts["WNBA"] * 2, remaining_picks)  # Up to 4 WNBA picks
+            distribution["WNBA"] = wnba_picks
+            remaining_picks -= wnba_picks
+            logger.info(f"🏀 Allocated {wnba_picks} picks to WNBA")
+        
+        # MMA/CFB get remaining picks if available
+        for sport in ["MMA", "CFB"]:
+            if sport_counts[sport] > 0 and remaining_picks > 0:
+                sport_picks = min(3, sport_counts[sport] * 2, remaining_picks)
+                distribution[sport] = sport_picks
+                remaining_picks -= sport_picks
+                logger.info(f"🥊 Allocated {sport_picks} picks to {sport}")
+        
+        # If we still have remaining picks, distribute proportionally to active sports
+        if remaining_picks > 0:
+            logger.info(f"📊 Distributing {remaining_picks} remaining picks proportionally")
+            for sport in active_sports:
+                if remaining_picks <= 0:
+                    break
+                if sport_counts[sport] > 0:
+                    extra_picks = min(remaining_picks, 2)  # Max 2 extra per sport
+                    distribution[sport] += extra_picks
+                    remaining_picks -= extra_picks
+        
+        # Ensure we don't exceed target
+        total_allocated = sum(distribution.values())
+        if total_allocated > target_picks:
+            # Trim excess picks starting from lowest priority sports
+            excess = total_allocated - target_picks
+            for sport in ["CFB", "MMA", "WNBA", "MLB", "NFL"]:
+                if excess <= 0:
+                    break
+                reduction = min(excess, distribution[sport])
+                distribution[sport] -= reduction
+                excess -= reduction
+        
+        logger.info(f"📊 Final distribution for {target_picks} total picks: {distribution}")
         return distribution
     
     def _format_sport_distribution_requirements(self, sport_distribution: Dict[str, int], target_picks: int) -> str:
@@ -516,7 +601,7 @@ class IntelligentTeamsAgent:
         total_expected = sum(active_sports.values())
         
         # Generate requirements for each sport
-        sport_order = ["WNBA", "MLB", "MMA"]  # Preferred ordering
+        sport_order = ["NFL", "MLB", "WNBA", "CFB", "MMA"]  # Include CFB explicitly
         for sport in sport_order:
             if sport in active_sports:
                 picks_count = active_sports[sport]
@@ -531,25 +616,158 @@ class IntelligentTeamsAgent:
         requirements.append("- Focus on generating the FULL amount for each sport to maximize frontend filtering options")
         
         return "\n".join(requirements)
+
+    async def decide_pick_distribution_ai(self, games: List[Dict[str, Any]], bets: List[TeamBet], target_picks: int) -> Dict[str, int]:
+        """Ask Grok to allocate picks across sports intelligently based on slate and available odds.
+        Fallback to heuristic distribution if the model response is invalid."""
+        try:
+            # Build event->sport map and capacities per sport from available bets
+            event_sport = {str(g.get("id")): g.get("sport", "") for g in games}
+            def map_display_sport(full_name: str) -> str:
+                if full_name == "Women's National Basketball Association":
+                    return "WNBA"
+                if full_name == "Major League Baseball":
+                    return "MLB"
+                if full_name == "National Football League":
+                    return "NFL"
+                if full_name == "College Football":
+                    return "CFB"
+                if full_name == "Ultimate Fighting Championship":
+                    return "MMA"
+                return "OTHER"
+            capacities: Dict[str, int] = {"MLB": 0, "WNBA": 0, "NFL": 0, "CFB": 0, "MMA": 0}
+            for b in bets:
+                sport_full = event_sport.get(str(b.event_id), "")
+                capacities[map_display_sport(sport_full)] = capacities.get(map_display_sport(sport_full), 0) + 1
+
+            games_by_sport = {"MLB": 0, "WNBA": 0, "NFL": 0, "CFB": 0, "MMA": 0}
+            for g in games:
+                games_by_sport[map_display_sport(g.get("sport", ""))] += 1
+
+            prompt = f"""
+You are an elite betting strategist. Allocate EXACTLY {target_picks} TEAM picks across sports based on slate depth and value.
+
+Sports and availability today (games, available_bets):
+- MLB: {games_by_sport['MLB']} games, {capacities['MLB']} bets
+- WNBA: {games_by_sport['WNBA']} games, {capacities['WNBA']} bets
+- NFL: {games_by_sport['NFL']} games, {capacities['NFL']} bets
+- CFB: {games_by_sport['CFB']} games, {capacities['CFB']} bets
+- MMA: {games_by_sport['MMA']} events, {capacities['MMA']} bets
+
+Rules:
+- Output JSON only with keys: MLB, WNBA, NFL, CFB, MMA
+- Sum of values MUST equal {target_picks}
+- Do not assign picks to sports with 0 games or 0 available bets
+- Prefer richer slates (more games and bets)
+
+Return JSON like:
+{{"MLB": 7, "WNBA": 3, "NFL": 4, "CFB": 1, "MMA": 0}}
+"""
+
+            response = await self.grok_client.chat.completions.create(
+                model="grok-4",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2
+            )
+
+            text = response.choices[0].message.content or "{}"
+            start = text.find("{")
+            end = text.rfind("}") + 1
+            ai_dist = json.loads(text[start:end]) if start != -1 and end > start else {}
+
+            # Sanitize and normalize with capacities and exact total
+            order = ["NFL", "CFB", "MLB", "WNBA", "MMA"]
+            sanitized = {s: max(0, int(ai_dist.get(s, 0))) for s in ["MLB","WNBA","NFL","CFB","MMA"]}
+            # Zero out sports with no capacity
+            for s in list(sanitized.keys()):
+                if capacities.get(s, 0) <= 0:
+                    sanitized[s] = 0
+            # Cap by capacity
+            for s in sanitized:
+                cap = capacities.get(s, 0)
+                if cap > 0:
+                    sanitized[s] = min(sanitized[s], cap)
+                else:
+                    sanitized[s] = 0
+
+            total = sum(sanitized.values())
+            # If under target, fill round-robin based on order and capacity
+            if total < target_picks:
+                remaining = target_picks - total
+                while remaining > 0:
+                    progressed = False
+                    for s in order:
+                        if remaining <= 0:
+                            break
+                        cap = capacities.get(s, 0)
+                        if sanitized.get(s, 0) < cap and cap > 0:
+                            sanitized[s] = sanitized.get(s, 0) + 1
+                            remaining -= 1
+                            progressed = True
+                    if not progressed:
+                        break
+            elif total > target_picks:
+                # Reduce from lowest priority first
+                excess = total - target_picks
+                for s in reversed(order):
+                    if excess <= 0:
+                        break
+                    reducible = min(excess, sanitized.get(s, 0))
+                    sanitized[s] -= reducible
+                    excess -= reducible
+
+            # Final guard: if still incorrect, fallback
+            if sum(sanitized.values()) != target_picks:
+                logger.warning(f"AI distribution invalid after normalization: {sanitized}, falling back to heuristic")
+                return self._distribute_picks_by_sport(games, target_picks)
+
+            logger.info(f"🧠 AI sport distribution (teams): {sanitized}")
+            return sanitized
+        except Exception as e:
+            logger.error(f"Failed to decide pick distribution via AI: {e}")
+            return self._distribute_picks_by_sport(games, target_picks)
     
-    async def generate_daily_picks(self, target_date: Optional[datetime.date] = None, target_picks: int = 50) -> List[Dict[str, Any]]:
+    def get_nfl_week_games(self) -> List[Dict[str, Any]]:
+        """Get all NFL games for the current week (Thu-Sun)"""
+        try:
+            current_date = datetime.now().date()
+            
+            # Get games for the next 7 days to capture the full NFL week
+            all_nfl_games = []
+            for days_ahead in range(8):  # Today + next 7 days
+                target_date = current_date + timedelta(days=days_ahead)
+                games = self.db.get_games_for_date(target_date)
+                # Filter for NFL only
+                nfl_games = [g for g in games if g.get('sport') == 'National Football League']
+                all_nfl_games.extend(nfl_games)
+            
+            logger.info(f"🏈 Found {len(all_nfl_games)} NFL games for the week ahead")
+            return all_nfl_games
+        except Exception as e:
+            logger.error(f"Failed to fetch NFL week games: {e}")
+            return []
+    
+    async def generate_daily_picks(self, target_date: Optional[datetime.date] = None, target_picks: int = 15) -> List[Dict[str, Any]]:
         if target_date is None:
             target_date = datetime.now().date()
             
-        logger.info(f"🚀 Starting intelligent multi-sport team analysis for {target_date}...")
-        
-        games = self.db.get_upcoming_games(target_date)
+        if self.nfl_week_mode:
+            logger.info(f"🚀 Starting intelligent NFL week team analysis...")
+            games = self.get_nfl_week_games()
+        else:
+            logger.info(f"🚀 Starting intelligent multi-sport team analysis for {target_date}...")
+            games = self.db.get_upcoming_games(target_date)
         logger.info(f"📅 Found {len(games)} games for {target_date} across all sports")
         
         if not games:
             logger.warning(f"No games found for {target_date}")
             return []
         
-        # Get sport distribution for picks - now generates more picks per sport
-        sport_distribution = self._distribute_picks_by_sport(games, target_picks)
-        
+        # First, fetch available bets from odds data
         game_ids = [game["id"] for game in games]
         available_bets = self.db.get_team_odds_for_games(game_ids)
+        # Get sport distribution for picks using AI (fallback to heuristic)
+        sport_distribution = await self.decide_pick_distribution_ai(games, available_bets, target_picks)
         logger.info(f"🎯 Found {len(available_bets)} available team bets across all sports")
         
         if not available_bets:
@@ -603,48 +821,116 @@ class IntelligentTeamsAgent:
         sports_in_data = set(game.get('sport', 'Unknown') for game in games)
         sports_summary = ", ".join(sports_in_data)
         
-        # STEP 3: Calculate balanced research allocation for team bets
-        mlb_games = len([g for g in games if g.get('sport') == 'Major League Baseball'])
-        wnba_games = len([g for g in games if g.get('sport') == "Women's National Basketball Association"])
-        total_games = mlb_games + wnba_games
-        
-        # Default research ratios
-        wnba_research_ratio = 0.0
-        mlb_research_ratio = 1.0
-        
-        if sport_distribution["WNBA"] > 0 and sport_distribution["MLB"] > 0:
-            # Both sports available - focus heavily on MLB since we need 7 picks vs 3 WNBA
-            wnba_research_ratio = 0.25  # Reduced WNBA research
-            mlb_research_ratio = 0.75   # Increased MLB research
-        elif sport_distribution["MLB"] > 0:
-            # Only MLB available
+        # STEP 3: Calculate research allocation based on mode or AI-decided distribution
+        target_nfl_queries = 0
+        target_wnba_queries = 0
+        target_mlb_queries = 0
+        target_cfb_queries = 0
+        target_mma_queries = 0
+        if self.nfl_week_mode or (hasattr(self, 'nfl_only_mode') and self.nfl_only_mode):
+            # NFL Week Mode or NFL Only Mode - Focus exclusively on NFL
+            nfl_games = len([g for g in games if g.get('sport') == 'National Football League'])
+            target_nfl_queries = min(22, max(15, nfl_games))  # 15-22 NFL team queries
+            target_wnba_queries = 0
+            target_mlb_queries = 0
+            target_web_searches = 6  # NFL injury/lineup/weather searches
+            
+            research_focus = "NFL"
+            if self.nfl_week_mode:
+                sport_queries_text = f"**NFL Team Research**: {target_nfl_queries} different NFL teams/matchups (for 5 final picks)"
+            else:
+                sport_queries_text = f"**NFL Team Research**: {target_nfl_queries} different NFL teams/matchups (NFL-only mode)"
+            web_searches_text = "**Web Searches**: 6 total (NFL injury/lineup/weather)"
+        elif sport_distribution and sum(sport_distribution.values()) > 0:
+            # Multi-sport AI-driven allocation: set queries proportional to desired pick counts
+            def q_for(picks: int, per_pick: int = 2, min_q: int = 4, max_q: int = 20) -> int:
+                return max(min_q, min(max_q, picks * per_pick)) if picks > 0 else 0
+
+            target_mlb_queries = q_for(sport_distribution.get("MLB", 0))
+            target_wnba_queries = q_for(sport_distribution.get("WNBA", 0))
+            target_nfl_queries = q_for(sport_distribution.get("NFL", 0), per_pick=3)
+            target_cfb_queries = q_for(sport_distribution.get("CFB", 0), per_pick=3)
+            target_mma_queries = q_for(sport_distribution.get("MMA", 0), per_pick=2, min_q=2, max_q=10)
+            target_web_searches = 6
+
+            research_focus = "Multi-sport"
+            parts = []
+            for label, q in [("MLB", target_mlb_queries), ("WNBA", target_wnba_queries), ("NFL", target_nfl_queries), ("CFB", target_cfb_queries), ("MMA", target_mma_queries)]:
+                if q > 0:
+                    parts.append(f"**{label} Team Research**: {q} different teams/matchups")
+            sport_queries_text = "\n".join(["- " + p for p in parts]) if parts else "- Balanced team research across active sports"
+            web_searches_text = "**Web Searches**: 6 total (injuries, weather, lineups across chosen sports)"
+        else:
+            # Multi-sport mode - Calculate balanced research allocation
+            mlb_games = len([g for g in games if g.get('sport') == 'Major League Baseball'])
+            wnba_games = len([g for g in games if g.get('sport') == "Women's National Basketball Association"])            
+            # Default research ratios
             wnba_research_ratio = 0.0
             mlb_research_ratio = 1.0
+            
+            if sport_distribution["WNBA"] > 0 and sport_distribution["MLB"] > 0:
+                # Both sports available - focus heavily on MLB since we need 7 picks vs 3 WNBA
+                wnba_research_ratio = 0.25  # Reduced WNBA research
+                mlb_research_ratio = 0.75   # Increased MLB research
+            elif sport_distribution["MLB"] > 0:
+                # Only MLB available
+                wnba_research_ratio = 0.0
+                mlb_research_ratio = 1.0
+            
+            # Target: 6-8 WNBA teams for 3 picks, 16-20 MLB teams for 7 picks  
+            target_wnba_queries = min(8, max(6, int(15 * wnba_research_ratio)))
+            target_mlb_queries = min(20, max(16, int(15 * mlb_research_ratio)))
+            target_nfl_queries = 0
+            target_web_searches = 6
+            
+            research_focus = "MLB/WNBA"
+            sport_queries_text = f"""- **WNBA Team Research**: {target_wnba_queries} different teams/matchups (for 3 final picks)
+- **MLB Team Research**: {target_mlb_queries} different teams/matchups (for 7 final picks)"""
+            web_searches_text = "**Web Searches**: 6 total (4 MLB injury/lineup/weather, 2 WNBA injury/lineup)"
         
-        # Target: 6-8 WNBA teams for 3 picks, 16-20 MLB teams for 7 picks  
-        target_wnba_queries = min(8, max(6, int(15 * wnba_research_ratio)))
-        target_mlb_queries = min(20, max(16, int(15 * mlb_research_ratio)))
-        
-        prompt = f"""You are an elite sports betting analyst creating a BALANCED DIVERSE team research strategy.
+        # Calculate sport-specific info for prompt
+        if self.nfl_week_mode or (hasattr(self, 'nfl_only_mode') and self.nfl_only_mode):
+            nfl_game_count = len([g for g in games if g.get('sport') == 'National Football League'])
+            sport_info = f"NFL Games: {nfl_game_count}"
+            task_focus = f"**NFL Focus**: Research {target_nfl_queries} DIFFERENT NFL teams/matchups (mix of favorites, underdogs, different conferences)"
+        elif sport_distribution and sum(sport_distribution.values()) > 0:
+            mlb_game_count = len([g for g in games if g.get('sport') == 'Major League Baseball'])
+            wnba_game_count = len([g for g in games if g.get('sport') == "Women's National Basketball Association"])            
+            nfl_game_count = len([g for g in games if g.get('sport') == 'National Football League'])
+            cfb_game_count = len([g for g in games if g.get('sport') == 'College Football'])
+            sport_info = f"MLB Games: {mlb_game_count}, WNBA Games: {wnba_game_count}, NFL Games: {nfl_game_count}, CFB Games: {cfb_game_count}"
+            focus_parts = []
+            if target_mlb_queries: focus_parts.append(f"**MLB Focus**: Research {target_mlb_queries} DIFFERENT MLB teams/matchups")
+            if target_wnba_queries: focus_parts.append(f"**WNBA Focus**: Research {target_wnba_queries} DIFFERENT WNBA teams/matchups")
+            if target_nfl_queries: focus_parts.append(f"**NFL Focus**: Research {target_nfl_queries} DIFFERENT NFL teams/matchups")
+            if target_cfb_queries: focus_parts.append(f"**CFB Focus**: Research {target_cfb_queries} DIFFERENT CFB matchups")
+            if target_mma_queries: focus_parts.append(f"**MMA Focus**: Research {target_mma_queries} DIFFERENT events/matchups")
+            task_focus = "\n".join(focus_parts) if focus_parts else "Focus on diverse matchups across active sports"
+        else:
+            mlb_game_count = len([g for g in games if g.get('sport') == 'Major League Baseball'])
+            wnba_game_count = len([g for g in games if g.get('sport') == "Women's National Basketball Association"])            
+            sport_info = f"MLB Games: {mlb_game_count}, WNBA Games: {wnba_game_count}"
+            task_focus = f"**WNBA Focus**: Research {target_wnba_queries} DIFFERENT WNBA teams/matchups (mix of contenders, underdogs, pace plays)\n**MLB Focus**: Research {target_mlb_queries} DIFFERENT MLB teams/matchups (variety of divisions, ballparks, situations)"
 
-# CRITICAL REQUIREMENTS - BALANCED TEAM RESEARCH STRATEGY:
+        prompt = f"""You are an elite sports betting analyst creating a FOCUSED {research_focus} team research strategy.
+
+# CRITICAL REQUIREMENTS - {research_focus} RESEARCH STRATEGY:
 
 ## RESEARCH ALLOCATION (MUST FOLLOW EXACTLY):
-- **WNBA Team Research**: {target_wnba_queries} different teams/matchups (for 3 final picks)
-- **MLB Team Research**: {target_mlb_queries} different teams/matchups (for 7 final picks)
-- **Total StatMuse Queries**: {target_wnba_queries + target_mlb_queries}
-- **Web Searches**: 6 total (4 MLB injury/lineup/weather, 2 WNBA injury/lineup)
+{sport_queries_text}
+- **Total StatMuse Queries**: {target_nfl_queries + target_wnba_queries + target_mlb_queries + target_cfb_queries + target_mma_queries}
+{web_searches_text}
 
 ## DIVERSITY REQUIREMENTS FOR TEAMS:
-- **NO REPETITIVE POPULAR TEAMS**: Avoid Yankees, Dodgers, Lakers-style teams every time
+- **NO REPETITIVE POPULAR TEAMS**: Avoid Cowboys, Chiefs, Patriots-style teams every time
 - **RESEARCH DIFFERENT TEAMS**: Mix contenders, underdogs, value plays, different divisions
 - **VARIED BET TYPES**: Don't just research moneyline - include spreads, totals, team props
-- **MATCHUP VARIETY**: Research different types of matchups (pitcher vs hitter friendly, pace, etc.)
+- **MATCHUP VARIETY**: Research different types of matchups (offensive vs defensive, pace, etc.)
 - **AVOID BIAS**: Don't just research "sexy" teams - find value in overlooked matchups
 
 # AVAILABLE DATA:
 Games: {len(games)} across {sports_summary}
-MLB Games: {mlb_games}, WNBA Games: {wnba_games}
+{sport_info}
 Total Team Bets: {len(bets)}
 
 # CURRENT STATMUSE CONTEXT:
@@ -667,26 +953,30 @@ AVAILABLE TEAM BETS SAMPLE:
 # YOUR TASK:
 Generate a research plan that follows the EXACT allocation above and focuses on DIVERSE teams from the actual games data.
 
-**WNBA Focus**: Research {target_wnba_queries} DIFFERENT WNBA teams/matchups (mix of contenders, underdogs, pace plays)
-**MLB Focus**: Research {target_mlb_queries} DIFFERENT MLB teams/matchups (variety of divisions, ballparks, situations)"
+{task_focus}"
 
 # YOUR TOOLS
 
 ## StatMuse Tool
-You have access to a powerful StatMuse API that can answer baseball questions with real data.
+{'You have access to a powerful StatMuse API that can answer NFL questions with real data.' if self.nfl_week_mode else 'You have access to a powerful StatMuse API that can answer baseball questions with real data.'}
 
 **SUCCESSFUL QUERY EXAMPLES** (these work well but dont feel limited to just these):
-- "New York Yankees record vs Boston Red Sox this season" 
+{'''- "Kansas City Chiefs record vs Los Angeles Chargers this season"
+- "Buffalo Bills home record last 10 games"  
+- "Tampa Bay Buccaneers points per game last 5 games"
+- "Baltimore Ravens defensive rating this season"
+- "New Orleans Saints passing yards per game last 10 games"
+- "Pittsburgh Steelers rushing defense this season"''' if self.nfl_week_mode else '''- "New York Yankees record vs Boston Red Sox this season" 
 - "Los Angeles Dodgers home record last 10 games"
 - "Atlanta Braves runs scored per game last 5 games"
 - "Houston Astros bullpen ERA last 30 days"
 - "Team batting average vs left handed pitching for Philadelphia Phillies"
 - "Coors Field home runs allowed this season"
-- "Yankee Stadium runs scored in day games"
+- "Yankee Stadium runs scored in day games"'''}
 
 **QUERIES THAT MAY FAIL** (avoid these patterns):
-- Very specific situational stats ("with runners in scoring position")
-- Complex multi-condition queries ("vs left-handed pitchers in day games")
+- Very specific situational stats {"(with specific personnel)" if self.nfl_week_mode else "(with runners in scoring position)"}
+- Complex multi-condition queries {"(vs specific formations in primetime)" if self.nfl_week_mode else "(vs left-handed pitchers in day games)"}
 - Obscure historical comparisons
 - Real-time injury/lineup status
 - Weather-dependent statistics
@@ -694,9 +984,9 @@ You have access to a powerful StatMuse API that can answer baseball questions wi
 **BEST PRACTICES**:
 - Keep queries simple and direct
 - Focus on season totals, averages, recent games (last 5-15)
-- Use team names exactly as they appear in MLB
-- Ask about standard team stats: record, runs scored/allowed, ERA, bullpen stats
-- Venue-specific queries work well for major stadiums
+- Use team names exactly as they appear in {'NFL' if self.nfl_week_mode else 'MLB'}
+- Ask about standard team stats: {'record, points scored/allowed, offensive/defensive ratings' if self.nfl_week_mode else 'record, runs scored/allowed, ERA, bullpen stats'}
+- {'Stadium-specific queries work for major venues' if self.nfl_week_mode else 'Venue-specific queries work well for major stadiums'}
 
 ## Web Search Tool
 You can search the web for:
@@ -718,27 +1008,26 @@ You can search the web for:
 Return ONLY a valid JSON object with this structure:
 
 {{
-    "research_strategy": "Balanced diverse research strategy focusing on team diversity",
+    "research_strategy": "{'NFL-focused research strategy for week ahead' if self.nfl_week_mode else 'Balanced diverse research strategy focusing on team diversity'}",
     "statmuse_queries": [
-        // {target_wnba_queries} WNBA team queries (different teams, varied bet types)
-        // {target_mlb_queries} MLB team queries (different teams, varied bet types)
+        {'// NFL team queries (different teams, varied bet types)' if self.nfl_week_mode else f'// {target_wnba_queries} WNBA team queries (different teams, varied bet types) // {target_mlb_queries} MLB team queries (different teams, varied bet types)'}
         {{
             "query": "[Diverse Team Name] [varied stat/matchup] this season",
             "priority": "high/medium/low",
-            "sport": "WNBA/MLB"
+            "sport": "{'NFL' if self.nfl_week_mode else 'WNBA/MLB'}"
         }}
     ],
     "web_searches": [
-        // 3 MLB injury/lineup/weather searches, 2 WNBA injury/lineup searches
+        {'// NFL injury/lineup/weather searches' if self.nfl_week_mode else '// 3 MLB injury/lineup/weather searches, 2 WNBA injury/lineup searches'}
         {{
             "query": "[Team Name] injury status lineup news weather",
             "priority": "high/medium/low",
-            "sport": "WNBA/MLB"
+            "sport": "{'NFL' if self.nfl_week_mode else 'WNBA/MLB'}"
         }}
     ]
 }}
 
-**CRITICAL**: Use REAL diverse teams from the games data above. NO repetitive Yankees/Dodgers/popular teams pattern!"""
+**CRITICAL**: Use REAL diverse teams from the games data above. {'NO repetitive Cowboys/Chiefs/popular teams pattern!' if self.nfl_week_mode else 'NO repetitive Yankees/Dodgers/popular teams pattern!'}"""
         
         try:
             response = await self.grok_client.chat.completions.create(
@@ -1323,6 +1612,11 @@ REMEMBER:
                             display_sport = "MMA"
                         elif game_sport == "Major League Baseball":
                             display_sport = "MLB"
+                        elif game_sport == "College Football":
+                            # Store full label for UI compatibility (TwoTabPredictionsLayout filters by 'COLLEGE FOOTBALL')
+                            display_sport = "College Football"
+                        elif game_sport == "National Football League":
+                            display_sport = "NFL"
                         else:
                             display_sport = "MLB"  # Default to MLB for unknown games
                         
@@ -1577,8 +1871,14 @@ def parse_arguments():
                       help='Generate picks for tomorrow instead of today')
     parser.add_argument('--date', type=str, 
                       help='Specific date to generate picks for (YYYY-MM-DD)')
-    parser.add_argument('--picks', type=int, default=50,
-                      help='Target number of total picks to generate (default: 50)')
+    parser.add_argument('--picks', type=int, default=15,
+                      help='Target number of total picks to generate (default: 15)')
+    parser.add_argument('--nfl-week', action='store_true',
+                      help='Generate 5 best NFL team picks for the entire week ahead (Thu-Sun)')
+    parser.add_argument('--nfl-only', action='store_true',
+                      help='Generate picks for NFL games only (ignore other sports)')
+    parser.add_argument('--sport', type=str, choices=['NFL', 'MLB', 'WNBA', 'CFB', 'MMA'],
+                      help='Limit picks to a single sport (overrides multi-sport distribution)')
     parser.add_argument('--verbose', '-v', action='store_true',
                       help='Enable verbose logging')
     return parser.parse_args()
@@ -1601,20 +1901,50 @@ async def main():
     else:
         target_date = datetime.now().date()
     
-    logger.info(f"🤖 Starting Intelligent Teams Agent for {target_date}")
+    if args.nfl_week:
+        logger.info(f"🏈 Starting NFL Week Teams Agent for full week ahead")
+        target_picks = 5
+    elif args.nfl_only:
+        logger.info(f"🏈 Starting NFL-Only Teams Agent for {target_date}")
+        target_picks = args.picks
+    else:
+        logger.info(f"🤖 Starting Intelligent Teams Agent for {target_date}")
+        target_picks = args.picks
     
     agent = IntelligentTeamsAgent()
     
-    # Calculate dynamic target picks based on available games and sport distribution
-    # This ensures we generate enough picks for frontend filtering
-    games = agent.db.get_upcoming_games(target_date)
-    if games:
-        sport_distribution = agent._distribute_picks_by_sport(games, args.picks)
-        dynamic_target = sum(sport_distribution.values())
-        logger.info(f"📊 Calculated dynamic target: {dynamic_target} picks across sports")
-        target_picks = max(args.picks, dynamic_target)  # Use the higher of user-specified or calculated
-    else:
-        target_picks = args.picks
+    # Set NFL week mode if flag is provided
+    agent.nfl_week_mode = args.nfl_week
+    # Set NFL only mode if flag is provided
+    agent.nfl_only_mode = args.nfl_only
+    # Propagate filtering flags to the database client
+    try:
+        # Ensure DB client exists
+        if hasattr(agent, 'db'):
+            # Support legacy nfl_only behavior at DB level
+            setattr(agent.db, 'nfl_only_mode', bool(args.nfl_only))
+            # Generic sport filter via --sport
+            if args.sport:
+                sport_map = {
+                    'NFL': 'National Football League',
+                    'MLB': 'Major League Baseball',
+                    'WNBA': "Women's National Basketball Association",
+                    'CFB': 'College Football',
+                    'MMA': 'Ultimate Fighting Championship'
+                }
+                full = sport_map.get(args.sport.upper())
+                if full:
+                    setattr(agent.db, 'sport_filter', [full])
+                    logger.info(f"🎯 Sport filter enabled: only '{full}' games will be used")
+                # If --sport NFL is used, imply nfl-only at agent level as well
+                if args.sport.upper() == 'NFL':
+                    agent.nfl_only_mode = True
+                    setattr(agent.db, 'nfl_only_mode', True)
+    except Exception as e:
+        logger.warning(f"Could not apply sport filters to DB client: {e}")
+    
+    # EXACT pick target: honor requested --picks without escalation
+    target_picks = args.picks
     
     picks = await agent.generate_daily_picks(target_date=target_date, target_picks=target_picks)
     
